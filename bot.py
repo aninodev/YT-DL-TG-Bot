@@ -6,13 +6,148 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import yt_dlp as youtube_dl
 import logging
 import io
-import configparser
 import requests
 import os
 import atexit
 import asyncio
 import sqlite3
-import json
+import argparse
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
+
+parser = argparse.ArgumentParser("YT-DL-TG-Bot")
+parser.add_argument(
+    "--config", default="config.toml", type=str, help="Config file to use (TOML-format)"
+)
+parser.add_argument(
+    "--token",
+    help="Log out from official Telegram servers to enable reliable local Telegram Bot API server usage.",
+)
+parser.add_argument(
+    "--db-type",
+    help="DB type to use to store records of which videos were sent to which chats already to prevent reposting.",
+    choices=["sqlite3"],
+    default=None,
+)
+parser.add_argument(
+    "--db-path",
+    help="Path of DB to use to store records of which videos were sent to which chats already to prevent reposting.",
+    type=str,
+    default=None,
+)
+parser.add_argument(
+    "--output-template",
+    help="Output filepath template for the temporary files downloaded before sending to the chat.",
+    type=str,
+    default=None,
+)
+parser.add_argument(
+    "--admin-ids",
+    help="Admin IDs to use for managing the bot via Telegram itself.",
+    type=int,
+    nargs="+",
+    default=None,
+)
+
+args = parser.parse_args()
+
+arg_bindings = {
+    "token": {
+        "type": str,
+        "tree": ["TelegramBot", "token"],
+    },
+    "config": {
+        "type": pathlib.Path,
+        "tree": None,
+    },
+    "db_type": {
+        "type": str,
+        "tree": ["Database", "type"],
+    },
+    "db_path": {
+        "type": str,
+        "tree": ["Database", "path"],
+    },
+    "output_template": {
+        "type": str,
+        "tree": ["YoutubeDL", "output_template"],
+    },
+    "admin_ids": {
+        "type": list[str | int],
+        "tree": ["Admin", "admin_ids"],
+    },
+}
+
+with open(args.config, "rb") as fp:
+    config = tomllib.load(fp)
+
+def get_nested(data: dict, args: list[str]):
+    """Get nested values from dict by nesting "path". Returns None if element does not exist."""
+    if args and data:
+        element = args[0]
+        if element:
+            value = data.get(element)
+            return value if len(args) == 1 else get_nested(value, args[1:])
+
+
+def get_settings():
+    """Load all settings from arg_bindings from the CLI args or config file as a fallback."""
+    settings = {}
+    for arg_name, binding in arg_bindings.items():
+        value = getattr(args, arg_name, None)
+        if value is None:
+            value = get_nested(config, binding["tree"])
+        elif not value:
+            if binding["any_true"]:
+                value = get_nested(config, binding["tree"])
+        else:
+            try:
+                value = binding["type"](value)
+            except TypeError:
+                value = get_nested(config, binding["tree"])
+            else:
+                settings[arg_name] = value
+                continue
+        if value is None:
+            try:
+                if binding["optional"]:
+                    continue
+            except KeyError:
+                pass
+            try:
+                # "any_true" must have either true or false, so if the value is not Truthy at this point, consider it False
+                if binding["any_true"]:
+                    settings[arg_name] = False
+                    continue
+            except KeyError:
+                pass
+            raise TypeError("Param {} is missing.".format(arg_name))
+        try:
+            value = binding["type"](value)
+        except TypeError:
+            if binding["optional"]:
+                continue
+            else:
+                raise TypeError("Param {} is of incorrect type.".format(arg_name))
+        settings[arg_name] = value
+    return settings
+
+
+settings = get_settings()
+
+
+def get_setting(param: str):
+    """Get a single setting parameter from args/config."""
+    try:
+        setting = settings[param]
+    except KeyError:
+        raise KeyError("Parameter with CLI name {} not found.".format(param))
+    return setting
+
 
 # Enable logging
 logging.basicConfig(
@@ -23,15 +158,9 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# Load the bot token from a configuration file
-config = configparser.ConfigParser()
-config.read("settings.ini")
-token = config["TelegramBot"]["token"]
-ytdl_output_template = config["YoutubeDL"].get("output_template", raw=True)
-
-db_type = config["Database"].get("type", "none").lower().strip()
+db_type = get_setting("db_type")
 if db_type.startswith("sqlite"):
-    db_path = config["Database"].get("path")
+    db_path = get_setting("db_path")
 
     def get_con():
         return sqlite3.connect(db_path, timeout=5)
@@ -91,6 +220,7 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except IndexError:
         await message.reply_text("Please give a playlist URL")
         return
+    ytdl_output_template = get_setting("output_template")
     ytdl_options = {
         "format": "bestaudio",
         # Directly download Opus audio streams from YouTube
@@ -374,7 +504,7 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def dump_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     sender = update.effective_sender
-    admin_ids = [str(a) for a in json.loads(config.get("Admin", "admin_ids"))]
+    admin_ids = get_setting("admin_ids")
     if str(sender.id) not in admin_ids:
         message.reply_text("Sorry, you do not have permission to use this command.")
     else:
@@ -391,6 +521,8 @@ async def dump_db(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     """Start the bot."""
+    logger.debug("Settings: {}".format(settings))
+    token = get_setting("token")
     # Create the Application and pass it your bot's token.
     application = (
         Application.builder()
