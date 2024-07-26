@@ -284,6 +284,9 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             extractor = "youtube"
             extractor_key = info["extractor_key"]
             retry_message = None
+            successful_audio_uploads = 0
+            skipped_audio_uploads = 0
+            failed_downloads = 0
             try:
                 entries = info["entries"]
             except KeyError:
@@ -321,6 +324,7 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             )
             for entry in entries:
+                skip_video = False
                 if entry:
                     try:
                         if not entry["original_url"]:
@@ -378,7 +382,8 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                         vid_id
                                     )
                                 )
-                                continue
+                                skipped_audio_uploads += 1
+                                skip_video = True
                             else:
                                 logger.info(
                                     "YouTube video with ID {} does not yet exist in the Telegram chat with ID {} (DB Params: {}). We will download it.".format(
@@ -416,6 +421,9 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         )
                         continue
                     else:
+                        if skip_video:
+                            remove_file(temp_path)
+                            continue
                         atexit.register(remove_file, temp_path)
                     with youtube_dl.YoutubeDL(ytdl_download_options) as ytdl_download:
                         logger.info('Downloading Opus audio stream from "%s"', vid_url)
@@ -428,8 +436,14 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         logger.info(
                             "Got result {} from downloading from video URL.".format(
                                 dl_res
-                            )
+                            ),
                         )
+                        if dl_res != 0:
+                            logger.warning(
+                                "Download result is not zero; there was likely an error with the download; skipping..."
+                            )
+                            failed_downloads += 1
+                            continue
                     try:
                         thumbnail_url = entry_dl["thumbnail"]
                         if thumbnail_url:
@@ -469,6 +483,19 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         )
                     )
                     try:
+                        filesize = os.path.getsize(temp_path)
+                    except FileNotFoundError:
+                        failed_downloads += 1
+                        logger.warning(
+                            "Video with ID {} and file_path {} was not found on filesystem. Skipping upload.".format(
+                                vid_id, temp_path
+                            )
+                        )
+                        continue
+                    logger.info(
+                        "File {} is {:,} bytes large.".format(temp_path, filesize)
+                    )
+                    try:
                         if local_mode:
                             audio_message = await context.bot.send_audio(
                                 chat_id=message.chat_id,
@@ -491,7 +518,9 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                     caption=vid_url[:1000],
                                 )
                         if audio_message:
+                            successful_audio_uploads += 1
                             logger.info("AUDIO_MESSAGE TRUE")
+                        remove_file(temp_path)
                     except FileNotFoundError:
                         logger.warning(
                             "YouTube video with ID {} could not be found on disk. It likely did not download successfully.".format(
@@ -510,12 +539,6 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                         vid_id, message.chat_id, db_params
                                     )
                                 )
-                    try:
-                        os.remove(temp_path)
-                    except KeyboardInterrupt:
-                        raise
-                    except FileNotFoundError:
-                        pass
                 else:
                     # Value of entry evaluated Falsy. Skip it
                     continue
@@ -527,15 +550,28 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text("Ran into an error. Please try again later.")
         logger.exception(
             "Ran into an error while downloading/sending music file(s) for playlist URL {} with info {}: {}".format(
-                playlist_url, info, e
+                playlist_url, len(info), e
             )
         )
     logger.info(
-        "Finished Fetching playlist {} for user {} in chat {}".format(
-            playlist_url, message.from_user, message.chat
+        "Finished Fetching playlist {} for user {} in chat {}. Successfully uploaded {} of {} videos in the playlist. Skipped {} because they were already sent to the chat. {} of the videos failed to download.".format(
+            playlist_url,
+            message.from_user,
+            message.chat,
+            successful_audio_uploads,
+            len(entries),
+            skipped_audio_uploads,
+            failed_downloads,
         )
     )
-    await message.reply_text("Finished.")
+    await message.reply_text(
+        "Finished. Successfully uploaded {} of {} videos in the playlist. Skipped {} videos because they were already sent to this chat. {} of the videos failed to download due to issues with YouTube (possibly restrictions, private/unavailable videos, etc.).".format(
+            successful_audio_uploads,
+            len(entries),
+            skipped_audio_uploads,
+            failed_downloads,
+        )
+    )
     await asyncio.sleep(5)
     await bot_message.delete()
 
