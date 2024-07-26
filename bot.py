@@ -29,6 +29,17 @@ parser.add_argument(
     help="Log out from official Telegram servers to enable reliable local Telegram Bot API server usage.",
 )
 parser.add_argument(
+    "--logout",
+    action="store_true",
+    help="Log out from official Telegram servers to enable reliable local Telegram Bot API server usage.",
+)
+parser.add_argument(
+    "--local-mode",
+    action="store_true",
+    help="Put the bot into local mode to use a local Telegram Bot API server.",
+)
+parser.add_argument("--base_url", help="Base URL of custom Telegram Bot API server.")
+parser.add_argument(
     "--db-type",
     help="DB type to use to store records of which videos were sent to which chats already to prevent reposting.",
     choices=["sqlite3"],
@@ -60,6 +71,21 @@ arg_bindings = {
     "token": {
         "type": str,
         "tree": ["TelegramBot", "token"],
+    },
+    "logout": {
+        "type": bool,
+        "tree": ["TelegramBot", "logout"],
+        "any_true": True,
+    },
+    "local_mode": {
+        "type": bool,
+        "tree": ["TelegramBot", "local_mode"],
+        "any_true": True,
+    },
+    "base_url": {
+        "type": str,
+        "tree": ["TelegramBot", "base_url"],
+        "optional": True,
     },
     "config": {
         "type": pathlib.Path,
@@ -221,6 +247,7 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except IndexError:
         await message.reply_text("Please give a playlist URL")
         return
+    local_mode = get_setting("local_mode")
     ytdl_output_template = get_setting("output_template")
     ytdl_options = {
         "format": "bestaudio",
@@ -442,16 +469,27 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         )
                     )
                     try:
-                        with open(temp_path, "rb") as audio_file:
+                        if local_mode:
                             audio_message = await context.bot.send_audio(
                                 chat_id=message.chat_id,
-                                audio=audio_file,
+                                audio="file://{}".format(temp_path),
                                 duration=int(entry["duration"]),
                                 title=video_title,
                                 thumbnail=thumbnail_file,
                                 disable_notification=True,
                                 caption=vid_url[:1000],
                             )
+                        else:
+                            with open(temp_path, "rb") as audio_file:
+                                audio_message = await context.bot.send_audio(
+                                    chat_id=message.chat_id,
+                                    audio=audio_file,
+                                    duration=int(entry["duration"]),
+                                    title=video_title,
+                                    thumbnail=thumbnail_file,
+                                    disable_notification=True,
+                                    caption=vid_url[:1000],
+                                )
                         if audio_message:
                             logger.info("AUDIO_MESSAGE TRUE")
                     except FileNotFoundError:
@@ -524,16 +562,34 @@ def main() -> None:
     """Start the bot."""
     logger.debug("Settings: {}".format(settings))
     token = get_setting("token")
+    local_mode = get_setting("local_mode")
+    base_url = get_setting("base_url")
+    logout: bool = get_setting("logout")
+
     # Create the Application and pass it your bot's token.
-    application = (
+    app_builder = (
         Application.builder()
         .token(token)
         .read_timeout(30)
         .write_timeout(30)
         .connect_timeout(30)
         .pool_timeout(5)
-        .build()
     )
+
+    if local_mode:
+        logger.info("Starting in Local Mode.")
+        app_builder = app_builder.local_mode(True).base_url(base_url)
+    else:
+        logger.info("Not running in Local Mode. Using official Telegram Bot API.")
+
+    application = app_builder.build()
+
+    if logout:
+        logger.info(
+            "Logging out of the Telegram Bot API to enable reliable connections via local Telegram Bot API server. Please remove the --logout flag from your next run and specify a manual Telegram Bot API Server address."
+        )
+        asyncio.run(application.bot.logOut())
+        return 0
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
