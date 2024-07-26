@@ -12,6 +12,7 @@ import atexit
 import asyncio
 import sqlite3
 import argparse
+import pathlib
 
 try:
     import tomllib
