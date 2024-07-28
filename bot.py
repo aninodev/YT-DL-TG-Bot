@@ -13,6 +13,7 @@ import asyncio
 import sqlite3
 import argparse
 import pathlib
+from urllib.parse import urlparse
 
 try:
     import tomllib
@@ -64,6 +65,12 @@ parser.add_argument(
     nargs="+",
     default=None,
 )
+parser.add_argument(
+    "--songs-flag-repost-text",
+    help="Repost Flag trigger arg text.",
+    type=str,
+    default=None,
+)
 
 args = parser.parse_args()
 
@@ -107,10 +114,15 @@ arg_bindings = {
         "type": list[str | int],
         "tree": ["Admin", "admin_ids"],
     },
+    "songs_flag_repost_text": {
+        "type": str,
+        "tree": ["Commands", "songs", "flag", "repost", "text"],
+    },
 }
 
 with open(args.config, "rb") as fp:
     config = tomllib.load(fp)
+
 
 def get_nested(data: dict, args: list[str]):
     """Get nested values from dict by nesting "path". Returns None if element does not exist."""
@@ -208,6 +220,14 @@ if USE_DB:
         )
 
 
+def uri_validator(x):
+    try:
+        result = urlparse(x)
+        return all([result.scheme, result.netloc])
+    except AttributeError:
+        return False
+
+
 def remove_file(file_path: str):
     """Remove a file from the filesystem. Required for atexit to delete the files automatically at application exit."""
     try:
@@ -229,7 +249,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
     await update.message.reply_markdown_v2(
         "Available commands:\n"
@@ -239,14 +259,86 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
 
 
-async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send songs in chat from playlist URL."""
+async def songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send songs in chat from playlist URL(s)."""
     message = update.effective_message
-    try:
-        playlist_url = message.text.split()[1].strip()
-    except IndexError:
-        await message.reply_text("Please give a playlist URL")
-        return
+    user = update.effective_user
+    repost = get_setting("songs_flag_repost_text") in (
+        a.strip().lower() for a in context.args
+    )
+    playlist_urls = set(
+        a.strip()
+        for a in context.args
+        if a.strip().lower()
+        not in [
+            get_setting("songs_flag_repost_text"),
+        ]
+    )
+    valid_urls: list[str] = []
+    invalid_urls: list[str] = []
+    for playlist_url in playlist_urls:
+        if uri_validator(playlist_url):
+            valid_urls.append(playlist_url)
+        else:
+            invalid_urls.append(playlist_url)
+    if valid_urls:
+        if invalid_urls:
+            logger.info(
+                "Song Playlist request message {} by {} in {} contained valid URLS: {} and invalid URLs: {}.".format(
+                    message, user, message.chat, valid_urls, invalid_urls
+                )
+            )
+        else:
+            logger.info(
+                "Song Playlist request message {} by {} in {} contained valid URLS: {}.".format(
+                    message, user, message.chat, valid_urls
+                )
+            )
+    else:
+        if invalid_urls:
+            logger.info(
+                "Song Playlist request message {} by {} in {} contained only invalid URLS: {}.".format(
+                    message, user, message.chat, invalid_urls
+                )
+            )
+            await message.reply_text(
+                "The following are not valid URLs: {}. Please try again.".format(
+                    invalid_urls
+                )
+            )
+            return
+        else:
+            logger.info(
+                "Song Playlist request message {} by {} in {} contained no playlist URLS.".format(
+                    message, user, message.chat
+                )
+            )
+            await message.reply_text("Please provide a playlist URL and try again.")
+            return
+    await send_songs_playlists(update, context, valid_urls, repost)
+
+
+async def send_songs_playlists(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    playlist_urls: list[str],
+    repost: bool,
+) -> None:
+    """Send songs in chat from playlist URL(s)."""
+    await update.message.reply_text(
+        "Fetching songs from {} video playlists: {}".format(
+            len(playlist_urls), playlist_urls
+        )
+    )
+    for playlist_url in playlist_urls:
+        await send_songs(update, context, playlist_url, repost)
+
+
+async def send_songs(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, playlist_url: str, repost: bool
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
     local_mode = get_setting("local_mode")
     ytdl_output_template = get_setting("output_template")
     ytdl_options = {
@@ -271,7 +363,7 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     }
     logger.info(
         "Fetching playlist {} for user {} in chat with {}".format(
-            playlist_url, message.from_user, message.chat
+            playlist_url, user, message.chat
         )
     )
     bot_message = await message.reply_text("Fetching playlist...")
@@ -284,7 +376,8 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             extractor = "youtube"
             extractor_key = info["extractor_key"]
             retry_message = None
-            successful_audio_uploads = 0
+            successful_new_audio_uploads = 0
+            successful_audio_reposts = 0
             skipped_audio_uploads = 0
             failed_downloads = 0
             try:
@@ -325,6 +418,7 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             for entry in entries:
                 skip_video = False
+                reposting = False
                 if entry:
                     try:
                         if not entry["original_url"]:
@@ -372,18 +466,34 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                 )
                                 > 0
                             ):
-                                logger.info(
-                                    "YouTube video with ID {} already exists in the Telegram chat with ID {}. Skipping...".format(
-                                        vid_id, message.chat_id
+                                if repost:
+                                    logger.info(
+                                        "YouTube video with ID {} already exists in the Telegram chat with ID {}, but {} was specified. Reposting audio...".format(
+                                            vid_id,
+                                            message.chat_id,
+                                            get_setting("songs_flag_repost_text"),
+                                        )
                                     )
-                                )
-                                await message.reply_text(
-                                    "YouTube video with ID {} was already uploaded to this chat.".format(
-                                        vid_id
+                                    await message.reply_text(
+                                        "YouTube video with ID {} was already uploaded to this chat, but {} was specified so we will repost it here.".format(
+                                            vid_id,
+                                            get_setting("songs_flag_repost_text"),
+                                        )
                                     )
-                                )
-                                skipped_audio_uploads += 1
-                                skip_video = True
+                                    reposting = True
+                                else:
+                                    logger.info(
+                                        "YouTube video with ID {} already exists in the Telegram chat with ID {}. Skipping...".format(
+                                            vid_id, message.chat_id
+                                        )
+                                    )
+                                    await message.reply_text(
+                                        "YouTube video with ID {} was already uploaded to this chat.".format(
+                                            vid_id
+                                        )
+                                    )
+                                    skipped_audio_uploads += 1
+                                    skip_video = True
                             else:
                                 logger.info(
                                     "YouTube video with ID {} does not yet exist in the Telegram chat with ID {} (DB Params: {}). We will download it.".format(
@@ -518,8 +628,11 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                     caption=vid_url[:1000],
                                 )
                         if audio_message:
-                            successful_audio_uploads += 1
                             logger.info("AUDIO_MESSAGE TRUE")
+                            if reposting:
+                                successful_audio_reposts += 1
+                            else:
+                                successful_new_audio_uploads += 1
                         remove_file(temp_path)
                     except FileNotFoundError:
                         logger.warning(
@@ -553,25 +666,48 @@ async def playlist_songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 playlist_url, len(info), e
             )
         )
-    logger.info(
-        "Finished Fetching playlist {} for user {} in chat {}. Successfully uploaded {} of {} videos in the playlist. Skipped {} because they were already sent to the chat. {} of the videos failed to download.".format(
-            playlist_url,
-            message.from_user,
-            message.chat,
-            successful_audio_uploads,
-            len(entries),
-            skipped_audio_uploads,
-            failed_downloads,
+    if repost:
+        logger.info(
+            "Finished Fetching playlist {} for user {} in chat {}. Successfully uploaded {} previously unsent videos of the {} videos in the playlist. Reposted {} videos because {} was specified. {} of the videos failed to download.".format(
+                playlist_url,
+                user,
+                message.chat,
+                successful_new_audio_uploads,
+                len(entries),
+                successful_audio_reposts,
+                get_setting("songs_flag_repost_text"),
+                failed_downloads,
+            )
         )
-    )
-    await message.reply_text(
-        "Finished. Successfully uploaded {} of {} videos in the playlist. Skipped {} videos because they were already sent to this chat. {} of the videos failed to download due to issues with YouTube (possibly restrictions, private/unavailable videos, etc.).".format(
-            successful_audio_uploads,
-            len(entries),
-            skipped_audio_uploads,
-            failed_downloads,
+        await message.reply_text(
+            "Finished. Successfully uploaded {} previously unsent videos of the {} videos in the playlist. Reposted {} videos because {} was specified. {} of the videos failed to download due to issues with YouTube (possibly restrictions, private/unavailable videos, etc.).".format(
+                successful_new_audio_uploads,
+                len(entries),
+                successful_audio_reposts,
+                get_setting("songs_flag_repost_text"),
+                failed_downloads,
+            )
         )
-    )
+    else:
+        logger.info(
+            "Finished Fetching playlist {} for user {} in chat {}. Successfully uploaded {} of {} videos in the playlist. Skipped {} because they were already sent to the chat. {} of the videos failed to download.".format(
+                playlist_url,
+                user,
+                message.chat,
+                successful_new_audio_uploads,
+                len(entries),
+                skipped_audio_uploads,
+                failed_downloads,
+            )
+        )
+        await message.reply_text(
+            "Finished. Successfully uploaded {} of {} videos in the playlist. Skipped {} videos because they were already sent to this chat. {} of the videos failed to download due to issues with YouTube (possibly restrictions, private/unavailable videos, etc.).".format(
+                successful_new_audio_uploads,
+                len(entries),
+                skipped_audio_uploads,
+                failed_downloads,
+            )
+        )
     await asyncio.sleep(5)
     await bot_message.delete()
 
@@ -629,8 +765,8 @@ def main() -> None:
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("songs", playlist_songs))
+    application.add_handler(CommandHandler("help", help))
+    application.add_handler(CommandHandler("songs", songs))
     application.add_handler(CommandHandler("dump_db", dump_db))
 
     # Run the bot until the user presses Ctrl-C

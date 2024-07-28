@@ -12,3 +12,6 @@ path = "db.sqlite3"
 
 [Admin]
 admin_ids = [ADMIN_ID_HERE,]
+
+[Commands]
+songs.flag.repost.text = "-repost"
