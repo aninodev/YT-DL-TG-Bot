@@ -66,8 +66,14 @@ parser.add_argument(
     default=None,
 )
 parser.add_argument(
+    "--song-flag-repost-text",
+    help="Repost Flag trigger arg text for /song command.",
+    type=str,
+    default=None,
+)
+parser.add_argument(
     "--songs-flag-repost-text",
-    help="Repost Flag trigger arg text.",
+    help="Repost Flag trigger arg text for /songs command.",
     type=str,
     default=None,
 )
@@ -113,6 +119,10 @@ arg_bindings = {
     "admin_ids": {
         "type": list[str | int],
         "tree": ["Admin", "admin_ids"],
+    },
+    "song_flag_repost_text": {
+        "type": str,
+        "tree": ["Commands", "song", "flag", "repost", "text"],
     },
     "songs_flag_repost_text": {
         "type": str,
@@ -255,8 +265,411 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Available commands:\n"
         "/start \- Display hello message\n"
         "/help \- Display this help message\n"
-        "/songs PLAYLIST \- Download songs from playlist and upload them into the current chat"
+        "/song VIDEO_URL \- Download song from video and upload it into the current chat\n"
+        "/songs PLAYLIST_URL \- Download songs from video playlist and upload them into the current chat"
     )
+
+
+
+async def song(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send song(s) in chat from video URL(s)."""
+    message = update.effective_message
+    user = update.effective_user
+    repost = get_setting("song_flag_repost_text") in (
+        a.strip().lower() for a in context.args
+    )
+    video_urls = set(
+        a.strip()
+        for a in context.args
+        if a.strip().lower()
+        not in [
+            get_setting("song_flag_repost_text"),
+        ]
+    )
+    valid_urls: list[str] = []
+    invalid_urls: list[str] = []
+    for video_url in video_urls:
+        if uri_validator(video_url):
+            valid_urls.append(video_url)
+        else:
+            invalid_urls.append(video_url)
+    if valid_urls:
+        if invalid_urls:
+            logger.info(
+                "Song request message {} by {} in {} contained valid URLS: {} and invalid URLs: {}.".format(
+                    message, user, message.chat, valid_urls, invalid_urls
+                )
+            )
+        else:
+            logger.info(
+                "Song request message {} by {} in {} contained valid URLS: {}.".format(
+                    message, user, message.chat, valid_urls
+                )
+            )
+    else:
+        if invalid_urls:
+            logger.info(
+                "Song request message {} by {} in {} contained only invalid URLS: {}.".format(
+                    message, user, message.chat, invalid_urls
+                )
+            )
+            await message.reply_text(
+                "The following are not valid URLs: {}. Please try again.".format(
+                    invalid_urls
+                )
+            )
+            return
+        else:
+            logger.info(
+                "Song request message {} by {} in {} contained no playlist URLS.".format(
+                    message, user, message.chat
+                )
+            )
+            await message.reply_text("Please provide a YouTube video URL and try again.")
+            return
+    await send_songs_individual(update, context, valid_urls, repost)
+
+
+async def send_songs_individual(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    video_urls: list[str],
+    repost: bool,
+) -> None:
+    """Send songs in chat from playlist URL(s)."""
+    await update.message.reply_text(
+        "Fetching songs from {} videos: {}".format(
+            len(video_urls), video_urls
+        )
+    )
+    for video_url in video_urls:
+        await send_song_individual(update, context, video_url, repost)
+
+
+async def send_song_individual(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, video_url: str, repost: bool
+) -> None:
+    message = update.effective_message
+    user = update.effective_user
+    local_mode = get_setting("local_mode")
+    ytdl_output_template = get_setting("output_template")
+    ytdl_options = {
+        "format": "bestaudio",
+        # Directly download Opus audio streams from YouTube
+        "audioformat": "opus",
+        # Remove the conversion postprocessor
+        "postprocessors": [],
+        # Output Path Template from config file
+        "outtmpl": ytdl_output_template,
+        # Continue processing even if a video is unavailable or we run into another error
+        "ignoreerrors": True,
+        "extract_flat": True,
+        "skip_download": True,
+        # Log yt-dlp output to the same logger as PlaylistBot
+        "logger": logger,
+    }
+    ytdl_download_options = {
+        **ytdl_options,
+        "extract_flat": False,
+        "skip_download": False,
+    }
+    logger.info(
+        "Fetching video {} for user {} in chat with {}".format(
+            video_url, user, message.chat
+        )
+    )
+    bot_message = await message.reply_text("Fetching video...")
+    try:
+        with youtube_dl.YoutubeDL(ytdl_options) as ytdl:
+            # Retrieve playlist information without downloading
+            info = ytdl.extract_info(video_url, download=False)
+            # playlist_title = info["title"]
+            # extractor = info['extractor'] # Use this if using the actual extractor name, which we are not currently using because of possible extractor names that are invalid for use in paths
+            extractor = "youtube"
+            extractor_key = info["extractor_key"]
+            retry_message = None
+            successful_new_audio_uploads = 0
+            successful_audio_reposts = 0
+            skipped_audio_uploads = 0
+            failed_downloads = 0
+            
+            entry = info
+            skip_video = False
+            reposting = False
+            if entry:
+                try:
+                    if not entry["original_url"]:
+                        logger.info(
+                            "Entry {} has a blank original_url param. Skipping...".format(
+                                entry
+                            )
+                        )
+                        raise Exception("Skipping because of blank original_url param")
+                except KeyError:
+                    try:
+                        if not entry["url"]:
+                            logger.info(
+                                "Entry {} does not have a original_url param and url param is blank. Skipping...".format(
+                                    entry
+                                )
+                            )
+                            raise Exception("Skipping because of no original_url param and url param is blank")
+                    except KeyError:
+                        logger.info(
+                            "Entry {} does not have an original_url or url param. Skipping...".format(
+                                entry
+                            )
+                        )
+                        raise Exception("Skipping because of no original_url or url params")
+                    else:
+                        vid_url = entry["url"]
+                else:
+                    vid_url = entry["original_url"]
+                vid_id = entry["id"]
+                if USE_DB:
+                    db_params = (
+                        "telegram",
+                        str(message.chat_id),
+                        extractor.strip(),
+                        str(vid_id).strip(),
+                    )
+                    with get_con() as db_con:
+                        if (
+                            len(
+                                db_con.execute(
+                                    "SELECT * from uploads where chat_platform=? AND chat_id=? AND video_platform=? AND video_id=?;",
+                                    db_params,
+                                ).fetchall()
+                            )
+                            > 0
+                        ):
+                            if repost:
+                                logger.info(
+                                    "YouTube video with ID {} already exists in the Telegram chat with ID {}, but {} was specified. Reposting audio...".format(
+                                        vid_id,
+                                        message.chat_id,
+                                        get_setting("songs_flag_repost_text"),
+                                    )
+                                )
+                                await message.reply_text(
+                                    "YouTube video with ID {} was already uploaded to this chat, but {} was specified so we will repost it here.".format(
+                                        vid_id,
+                                        get_setting("songs_flag_repost_text"),
+                                    )
+                                )
+                                reposting = True
+                            else:
+                                logger.info(
+                                    "YouTube video with ID {} already exists in the Telegram chat with ID {}. Skipping...".format(
+                                        vid_id, message.chat_id
+                                    )
+                                )
+                                await message.reply_text(
+                                    "YouTube video with ID {} was already uploaded to this chat.".format(
+                                        vid_id
+                                    )
+                                )
+                                skipped_audio_uploads += 1
+                                skip_video = True
+                        else:
+                            logger.info(
+                                "YouTube video with ID {} does not yet exist in the Telegram chat with ID {} (DB Params: {}). We will download it.".format(
+                                    vid_id, message.chat_id, db_params
+                                )
+                            )
+                try:
+                    # channel_title = entry["channel"]
+                    video_title = entry["title"]
+                except KeyError as e:
+                    logger.warn("Entry {} missing a param: {}".format(entry, e))
+                    raise Exception("Video is missing a required param")
+                try:
+                    # Insecure but it's much easier, shorter, and less prone to failure from keys not being present if using custom paths versus doing them manually without dict expansion.
+                    temp_path = ytdl_output_template % {
+                        **entry,
+                        "extractor": extractor,
+                        "extractor_key": extractor_key,
+                    }
+                    temp_path = os.path.abspath(os.path.normpath(temp_path))
+                except KeyError as e:
+                    logger.warning(
+                        "Did not get temp filepath for entry {} because of a missing param: {}".format(
+                            entry, e
+                        )
+                    )
+                    raise Exception("Coult not get temp file path because of missing required param")
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Ran into an exception while trying to get local temp filepath for video with URL {}: {}".format(
+                            vid_url, e
+                        )
+                    )
+                    raise Exception("Exception occured while trying to get local temp file path")
+                else:
+                    if skip_video:
+                        remove_file(temp_path)
+                        return
+                    atexit.register(remove_file, temp_path)
+                with youtube_dl.YoutubeDL(ytdl_download_options) as ytdl_download:
+                    logger.info('Downloading Opus audio stream from "%s"', vid_url)
+                    entry_dl = ytdl_download.extract_info(vid_url)
+                    dl_res = ytdl_download.download(
+                        [
+                            vid_url,
+                        ]
+                    )
+                    logger.info(
+                        "Got result {} from downloading from video URL.".format(
+                            dl_res
+                        ),
+                    )
+                    if dl_res != 0:
+                        logger.warning(
+                            "Download result is not zero; there was likely an error with the download; skipping..."
+                        )
+                        raise Exception("Download result not zero; download likely failed")
+                try:
+                    thumbnail_url = entry_dl["thumbnail"]
+                    if thumbnail_url:
+                        thumbnail_file = io.BytesIO(
+                            requests.get(thumbnail_url).content
+                        )
+                        logger.info(
+                            "Successfully fetched thumbnail for YouTube video with ID {}".format(
+                                vid_id
+                            )
+                        )
+                    else:
+                        thumbnail_file = None
+                except KeyError as e:
+                    logger.warning(
+                        "Thumbnail for video with URL {} could not be fetched because of an Exception: {}".format(
+                            vid_url, e
+                        )
+                    )
+                    thumbnail_file = None
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Thumbnail for video with URL {} could not be fetched because of an Exception: {}".format(
+                            vid_url, e
+                        )
+                    )
+                    thumbnail_file = None
+                logger.info("Posting audio stream to Telegram")
+                filename = bytes(
+                    os.path.basename(temp_path), encoding="latin1", errors="ignore"
+                ).decode("latin1", "ignore")
+                logger.info(
+                    "Sending audio with audio path {}, title {}, and filename {}.".format(
+                        temp_path, video_title, filename
+                    )
+                )
+                try:
+                    filesize = os.path.getsize(temp_path)
+                except FileNotFoundError:
+                    failed_downloads += 1
+                    logger.warning(
+                        "Video with ID {} and file_path {} was not found on filesystem. Skipping upload.".format(
+                            vid_id, temp_path
+                        )
+                    )
+                    raise Exception("Skipping video because file was not found on filesystem")
+                logger.info(
+                    "File {} is {:,} bytes large.".format(temp_path, filesize)
+                )
+                try:
+                    if local_mode:
+                        audio_message = await context.bot.send_audio(
+                            chat_id=message.chat_id,
+                            audio="file://{}".format(temp_path),
+                            duration=int(entry["duration"]),
+                            title=video_title,
+                            thumbnail=thumbnail_file,
+                            disable_notification=True,
+                            caption=vid_url[:1000],
+                        )
+                    else:
+                        with open(temp_path, "rb") as audio_file:
+                            audio_message = await context.bot.send_audio(
+                                chat_id=message.chat_id,
+                                audio=audio_file,
+                                duration=int(entry["duration"]),
+                                title=video_title,
+                                thumbnail=thumbnail_file,
+                                disable_notification=True,
+                                caption=vid_url[:1000],
+                            )
+                    if audio_message:
+                        logger.info("AUDIO_MESSAGE TRUE")
+                        if reposting:
+                            successful_audio_reposts += 1
+                        else:
+                            successful_new_audio_uploads += 1
+                    remove_file(temp_path)
+                except FileNotFoundError:
+                    logger.warning(
+                        "YouTube video with ID {} could not be found on disk. It likely did not download successfully.".format(
+                            vid_id
+                        )
+                    )
+                else:
+                    if USE_DB:
+                        with get_con() as db_con:
+                            db_con.execute(
+                                "INSERT OR IGNORE INTO uploads (chat_platform, chat_id, video_platform, video_id) VALUES (?, ?, ?, ?);",
+                                db_params,
+                            )
+                            logger.info(
+                                "Added YouTube video with ID {} in Telegram chat ID {} (DB Params: {}) to DB".format(
+                                    vid_id, message.chat_id, db_params
+                                )
+                            )
+            else:
+                # Value of entry evaluated Falsy. Skip it
+                raise Exception("Video info evaluated to falsy")
+    except youtube_dl.utils.DownloadError:
+        await bot_message.edit_text("Failed to download playlist.")
+    except KeyboardInterrupt:
+        raise
+    except Exception as e:
+        await message.reply_text("Ran into an error. Please try again later.")
+        logger.exception(
+            "Ran into an error while downloading/sending music file(s) for playlist URL {} with info {}: {}".format(
+                video_url, len(info), e
+            )
+        )
+    if repost:
+        logger.info(
+            "Finished Fetching video {} for user {} in chat {}.".format(
+                video_url,
+                user,
+                message.chat,
+            )
+        )
+        await message.reply_text(
+            "Finished. Successfully re-uploaded previously sent video with ID {}.".format(vid_id)
+        )
+    else:
+        logger.info(
+            "Finished Fetching video {} for user {} in chat {}.".format(
+                video_url,
+                user,
+                message.chat,
+            )
+        )
+        await message.reply_text(
+            "Finished. Successfully uploaded video with ID {}.".format(
+                vid_id,
+            )
+        )
+    await asyncio.sleep(5)
+    await bot_message.delete()
+
+
 
 
 async def songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -331,10 +744,10 @@ async def send_songs_playlists(
         )
     )
     for playlist_url in playlist_urls:
-        await send_songs(update, context, playlist_url, repost)
+        await send_songs_playlist(update, context, playlist_url, repost)
 
 
-async def send_songs(
+async def send_songs_playlist(
     update: Update, context: ContextTypes.DEFAULT_TYPE, playlist_url: str, repost: bool
 ) -> None:
     message = update.effective_message
@@ -766,6 +1179,7 @@ def main() -> None:
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
+    application.add_handler(CommandHandler("song", song))
     application.add_handler(CommandHandler("songs", songs))
     application.add_handler(CommandHandler("dump_db", dump_db))
 
