@@ -8,6 +8,7 @@ import logging
 import io
 import requests
 import os
+import sys
 import atexit
 import asyncio
 import sqlite3
@@ -20,6 +21,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib
 
+CURRENTLY_SUPPORTED_DB_SCHEMA_VERSION = 1
 
 parser = argparse.ArgumentParser("YT-DL-TG-Bot")
 parser.add_argument(
@@ -220,14 +222,87 @@ else:
     logger.error("DB type '{}' is invalid".format(db_type))
     USE_DB = False
 if USE_DB:
+
+    def does_db_table_exist(table_name: str):
+        db_type = get_setting("db_type")
+        # Handle SQLite3 table existance checking
+        if db_type.startswith("sqlite"):
+            with get_con() as db_con:
+                table_exists = bool(
+                    db_con.execute(
+                        "SELECT EXISTS (SELECT * FROM sqlite_master WHERE type='table' AND name=?);",
+                        (table_name,),
+                    ).fetchone()[0]
+                )
+        logger.info(
+            "DB table {} existance value is {}.".format(table_name, table_exists)
+        )
+        return table_exists
+
+    uploads_tables_existed = does_db_table_exist("uploads")
+    versions_table_existed = does_db_table_exist("versions")
+    if not versions_table_existed:
+        with get_con() as db_con:
+            if not versions_table_existed:
+                # Create table and unique index if not already present in the DB
+                db_con.execute("CREATE TABLE versions (component TEXT, version INT);")
+            db_con.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS unique_components ON versions (component);"
+            )
+            if not versions_table_existed:
+                # Default to DB Schema 0 if the table/component does not exist so it is recreated from scratch
+                db_con.execute(
+                    "INSERT INTO versions (component, version) VALUES (?, ?);",
+                    ("db_schema", 0),
+                )
+    with get_con() as db_con:
+        # Get current DB Schema version
+        db_schema = db_con.execute(
+            "SELECT version FROM versions WHERE component=?;", ("db_schema",)
+        ).fetchone()[0]
+    if int(db_schema) == CURRENTLY_SUPPORTED_DB_SCHEMA_VERSION:
+        clear_db = False
+    elif int(db_schema) > CURRENTLY_SUPPORTED_DB_SCHEMA_VERSION:
+        logger.critical(
+            "This version of the program supports Database Schema {} at most, but your Database is currently using newer Schema of {}. Please upgrade this program to use your newer Database Schema".format(
+                CURRENTLY_SUPPORTED_DB_SCHEMA_VERSION, db_schema
+            )
+        )
+        sys.exit(
+            "The database schema is too new for this version of the program. Please update this program or clear the database."
+        )
+    elif int(db_schema) == 0:
+        if uploads_tables_existed:
+            input_str = input(
+                "Your Database Schema predates our schema versioning system. We cannot automatically update your tables. Would you like us to overwrite your old tables with ones using the current schema? Your existing uploads data will be lost! Your Choice (Y to clear DB): "
+            )
+            if input_str.lower().strip() in ("y", "yes", "t", "true", "1"):
+                clear_db = True
+            else:
+                logger.warning(
+                    "You chose to not overwrite your old database. Since we cannot use the existing database schema, we will be running without DB usage nor upload logging."
+                )
+                USE_DB = False
+
+if USE_DB:
+    if clear_db:
+        db_con.execute("DROP TABLE uploads;")
     with get_con() as db_con:
         # Create table and unique index if not already present in the DB
         db_con.execute(
-            "CREATE TABLE IF NOT EXISTS uploads (chat_platform TEXT, chat_id TEXT, video_platform TEXT, video_id TEXT);"
+            "CREATE TABLE IF NOT EXISTS uploads (chat_platform TEXT, chat_id TEXT, message_id TEXT, video_platform TEXT, video_id TEXT, upload_type TEXT);"
         )
         db_con.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS unique_uploads ON uploads (chat_platform, chat_id, video_platform, video_id);"
+            "CREATE UNIQUE INDEX IF NOT EXISTS unique_uploads ON uploads (chat_platform, chat_id, message_id, video_platform, video_id, upload_type);"
         )
+        db_con.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS unique_messages ON uploads (chat_platform, chat_id, message_id);"
+        )
+        if clear_db:
+            db_con.execute(
+                "UPDATE versions SET version=? WHERE component=?;",
+                (CURRENTLY_SUPPORTED_DB_SCHEMA_VERSION, "db_schema"),
+            )
 
 
 def uri_validator(x):
@@ -268,7 +343,6 @@ async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/song VIDEO_URL \- Download song from video and upload it into the current chat\n"
         "/songs PLAYLIST_URL \- Download songs from video playlist and upload them into the current chat"
     )
-
 
 
 async def song(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -325,7 +399,9 @@ async def song(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     message, user, message.chat
                 )
             )
-            await message.reply_text("Please provide a YouTube video URL and try again.")
+            await message.reply_text(
+                "Please provide a YouTube video URL and try again."
+            )
             return
     await send_songs_individual(update, context, valid_urls, repost)
 
@@ -338,9 +414,7 @@ async def send_songs_individual(
 ) -> None:
     """Send songs in chat from playlist URL(s)."""
     await update.message.reply_text(
-        "Fetching songs from {} videos: {}".format(
-            len(video_urls), video_urls
-        )
+        "Fetching songs from {} videos: {}".format(len(video_urls), video_urls)
     )
     for video_url in video_urls:
         await send_song_individual(update, context, video_url, repost)
@@ -392,10 +466,11 @@ async def send_song_individual(
             successful_audio_reposts = 0
             skipped_audio_uploads = 0
             failed_downloads = 0
-            
+
             entry = info
             skip_video = False
             reposting = False
+            successful_audio_upload = False
             if entry:
                 try:
                     if not entry["original_url"]:
@@ -413,14 +488,18 @@ async def send_song_individual(
                                     entry
                                 )
                             )
-                            raise Exception("Skipping because of no original_url param and url param is blank")
+                            raise Exception(
+                                "Skipping because of no original_url param and url param is blank"
+                            )
                     except KeyError:
                         logger.info(
                             "Entry {} does not have an original_url or url param. Skipping...".format(
                                 entry
                             )
                         )
-                        raise Exception("Skipping because of no original_url or url params")
+                        raise Exception(
+                            "Skipping because of no original_url or url params"
+                        )
                     else:
                         vid_url = entry["url"]
                 else:
@@ -432,12 +511,13 @@ async def send_song_individual(
                         str(message.chat_id),
                         extractor.strip(),
                         str(vid_id).strip(),
+                        "video",
                     )
                     with get_con() as db_con:
                         if (
                             len(
                                 db_con.execute(
-                                    "SELECT * from uploads where chat_platform=? AND chat_id=? AND video_platform=? AND video_id=?;",
+                                    "SELECT * from uploads where chat_platform=? AND chat_id=? AND video_platform=? AND video_id=? AND upload_type=?;",
                                     db_params,
                                 ).fetchall()
                             )
@@ -497,7 +577,9 @@ async def send_song_individual(
                             entry, e
                         )
                     )
-                    raise Exception("Coult not get temp file path because of missing required param")
+                    raise Exception(
+                        "Coult not get temp file path because of missing required param"
+                    )
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
@@ -506,7 +588,9 @@ async def send_song_individual(
                             vid_url, e
                         )
                     )
-                    raise Exception("Exception occured while trying to get local temp file path")
+                    raise Exception(
+                        "Exception occured while trying to get local temp file path"
+                    )
                 else:
                     if skip_video:
                         remove_file(temp_path)
@@ -521,21 +605,19 @@ async def send_song_individual(
                         ]
                     )
                     logger.info(
-                        "Got result {} from downloading from video URL.".format(
-                            dl_res
-                        ),
+                        "Got result {} from downloading from video URL.".format(dl_res),
                     )
                     if dl_res != 0:
                         logger.warning(
                             "Download result is not zero; there was likely an error with the download; skipping..."
                         )
-                        raise Exception("Download result not zero; download likely failed")
+                        raise Exception(
+                            "Download result not zero; download likely failed"
+                        )
                 try:
                     thumbnail_url = entry_dl["thumbnail"]
                     if thumbnail_url:
-                        thumbnail_file = io.BytesIO(
-                            requests.get(thumbnail_url).content
-                        )
+                        thumbnail_file = io.BytesIO(requests.get(thumbnail_url).content)
                         logger.info(
                             "Successfully fetched thumbnail for YouTube video with ID {}".format(
                                 vid_id
@@ -577,10 +659,10 @@ async def send_song_individual(
                             vid_id, temp_path
                         )
                     )
-                    raise Exception("Skipping video because file was not found on filesystem")
-                logger.info(
-                    "File {} is {:,} bytes large.".format(temp_path, filesize)
-                )
+                    raise Exception(
+                        "Skipping video because file was not found on filesystem"
+                    )
+                logger.info("File {} is {:,} bytes large.".format(temp_path, filesize))
                 try:
                     if local_mode:
                         audio_message = await context.bot.send_audio(
@@ -605,6 +687,7 @@ async def send_song_individual(
                             )
                     if audio_message:
                         logger.info("AUDIO_MESSAGE TRUE")
+                        successful_audio_upload = True
                         if reposting:
                             successful_audio_reposts += 1
                         else:
@@ -618,16 +701,25 @@ async def send_song_individual(
                     )
                 else:
                     if USE_DB:
-                        with get_con() as db_con:
-                            db_con.execute(
-                                "INSERT OR IGNORE INTO uploads (chat_platform, chat_id, video_platform, video_id) VALUES (?, ?, ?, ?);",
-                                db_params,
+                        if successful_audio_upload:
+                            db_params = (
+                                "telegram",
+                                str(message.chat_id),
+                                str(audio_message.message_id),
+                                extractor.strip(),
+                                str(vid_id).strip(),
+                                "song",
                             )
-                            logger.info(
-                                "Added YouTube video with ID {} in Telegram chat ID {} (DB Params: {}) to DB".format(
-                                    vid_id, message.chat_id, db_params
+                            with get_con() as db_con:
+                                db_con.execute(
+                                    "INSERT OR IGNORE INTO uploads (chat_platform, chat_id, message_id, video_platform, video_id, upload_type) VALUES (?, ?, ?, ?, ?, ?);",
+                                    db_params,
                                 )
-                            )
+                                logger.info(
+                                    "Added YouTube video with ID {} in Telegram chat ID {} (DB Params: {}) to DB".format(
+                                        vid_id, message.chat_id, db_params
+                                    )
+                                )
             else:
                 # Value of entry evaluated Falsy. Skip it
                 raise Exception("Video info evaluated to falsy")
@@ -651,7 +743,9 @@ async def send_song_individual(
             )
         )
         await message.reply_text(
-            "Finished. Successfully re-uploaded previously sent video with ID {}.".format(vid_id)
+            "Finished. Successfully re-uploaded previously sent video with ID {}.".format(
+                vid_id
+            )
         )
     else:
         logger.info(
@@ -668,8 +762,6 @@ async def send_song_individual(
         )
     await asyncio.sleep(5)
     await bot_message.delete()
-
-
 
 
 async def songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -832,6 +924,7 @@ async def send_songs_playlist(
             for entry in entries:
                 skip_video = False
                 reposting = False
+                successful_audio_upload = False
                 if entry:
                     try:
                         if not entry["original_url"]:
@@ -868,12 +961,13 @@ async def send_songs_playlist(
                             str(message.chat_id),
                             extractor.strip(),
                             str(vid_id).strip(),
+                            "song",
                         )
                         with get_con() as db_con:
                             if (
                                 len(
                                     db_con.execute(
-                                        "SELECT * from uploads where chat_platform=? AND chat_id=? AND video_platform=? AND video_id=?;",
+                                        "SELECT * from uploads where chat_platform=? AND chat_id=? AND video_platform=? AND video_id=? AND upload_type=?;",
                                         db_params,
                                     ).fetchall()
                                 )
@@ -1042,6 +1136,7 @@ async def send_songs_playlist(
                                 )
                         if audio_message:
                             logger.info("AUDIO_MESSAGE TRUE")
+                            successful_audio_upload = True
                             if reposting:
                                 successful_audio_reposts += 1
                             else:
@@ -1055,16 +1150,25 @@ async def send_songs_playlist(
                         )
                     else:
                         if USE_DB:
-                            with get_con() as db_con:
-                                db_con.execute(
-                                    "INSERT OR IGNORE INTO uploads (chat_platform, chat_id, video_platform, video_id) VALUES (?, ?, ?, ?);",
-                                    db_params,
+                            if successful_audio_upload:
+                                db_params = (
+                                    "telegram",
+                                    str(message.chat_id),
+                                    str(audio_message.message_id),
+                                    extractor.strip(),
+                                    str(vid_id).strip(),
+                                    "song",
                                 )
-                                logger.info(
-                                    "Added YouTube video with ID {} in Telegram chat ID {} (DB Params: {}) to DB".format(
-                                        vid_id, message.chat_id, db_params
+                                with get_con() as db_con:
+                                    db_con.execute(
+                                        "INSERT OR IGNORE INTO uploads (chat_platform, chat_id, message_id, video_platform, video_id, upload_type) VALUES (?, ?, ?, ?, ?, ?);",
+                                        db_params,
                                     )
-                                )
+                                    logger.info(
+                                        "Added YouTube video with ID {} in Telegram chat ID {} (DB Params: {}) to DB".format(
+                                            vid_id, message.chat_id, db_params
+                                        )
+                                    )
                 else:
                     # Value of entry evaluated Falsy. Skip it
                     continue
