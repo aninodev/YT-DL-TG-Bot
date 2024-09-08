@@ -61,6 +61,12 @@ parser.add_argument(
     default=None,
 )
 parser.add_argument(
+    "--video-output-template",
+    help="Output filepath template for the temporary video files downloaded before sending to the chat.",
+    type=str,
+    default=None,
+)
+parser.add_argument(
     "--admin-ids",
     help="Admin IDs to use for managing the bot via Telegram itself.",
     type=int,
