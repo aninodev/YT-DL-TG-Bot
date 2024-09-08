@@ -4,7 +4,8 @@ local_mode = true
 base_url = "http://localhost:8081/bot"
 
 [YoutubeDL]
-output_template = "Temp-YouTube-Files/youtube-%(id)s.opus"
+song_output_template = "Temp-YouTube-Files/youtube-%(id)s.opus"
+video_output_template = "Temp-YouTube-Files/youtube-%(id)s.mp4"
 
 [Database]
 type = "sqlite3"
@@ -16,3 +17,5 @@ admin_ids = [ADMIN_ID_HERE,]
 [Commands]
 song.flag.repost.text = "-repost"
 songs.flag.repost.text = "-repost"
+video.flag.repost.text = "-repost"
+videos.flag.repost.text = "-repost"
