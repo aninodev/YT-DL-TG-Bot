@@ -41,7 +41,7 @@ parser.add_argument(
     action="store_true",
     help="Put the bot into local mode to use a local Telegram Bot API server.",
 )
-parser.add_argument("--base_url", help="Base URL of custom Telegram Bot API server.")
+parser.add_argument("--base-url", help="Base URL of custom Telegram Bot API server.")
 parser.add_argument(
     "--db-type",
     help="DB type to use to store records of which videos were sent to which chats already to prevent reposting.",
@@ -1356,7 +1356,7 @@ async def send_video_individual(
     local_mode = get_setting("local_mode")
     ytdl_output_template = get_setting("video_output_template")
     ytdl_options = {
-        "format": "(bv*[vcodec~='^((he|a)vc|h26[45])']+ba[ext=m4a])",
+        "format": "(bv*[vcodec~='^((he|a)vc|h26[45])']+ba[ext=m4a])/b[ext=mp4]",
         "merge_output_format": "mp4",
         "postprocessors": [],
         # Use custom cookies if specified
@@ -1773,7 +1773,7 @@ async def send_videos_playlist(
         # "format": "bv[ext=mp4]+ba[ext=m4a]/b[ext=mp4]",
         # "format": "bv*[vcodec=h264]+ba[acodec=aac]",
         # "format": "(bv*[vcodec~='^((he|a)vc|h26[45])']+ba)",
-        "format": "(bv*[vcodec~='^((he|a)vc|h26[45])']+ba[ext=m4a])",
+        "format": "(bv*[vcodec~='^((he|a)vc|h26[45])']+ba[ext=m4a])/b[ext=mp4]",
         "merge_output_format": "mp4",
         # # Directly download Opus audio streams from YouTube
         # "audioformat": "opus",
