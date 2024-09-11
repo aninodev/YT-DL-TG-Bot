@@ -431,7 +431,8 @@ async def song(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 "The following are not valid URLs: {}. Please try again.".format(
                     invalid_urls
-                )
+                ), 
+                disable_web_page_preview=True
             )
             return
         else:
@@ -455,7 +456,7 @@ async def send_songs_individual(
 ) -> None:
     """Send songs in chat from playlist URL(s)."""
     await update.message.reply_text(
-        "Fetching songs from {} videos: {}".format(len(video_urls), video_urls)
+        "Fetching songs from {} videos: {}".format(len(video_urls), video_urls), disable_web_page_preview=True
     )
     for video_url in video_urls:
         await send_song_individual(update, context, video_url, repost)
@@ -766,7 +767,7 @@ async def send_song_individual(
                 # Value of entry evaluated Falsy. Skip it
                 raise Exception("Video info evaluated to falsy")
     except youtube_dl.utils.DownloadError:
-        await bot_message.edit_text("Failed to download playlist.")
+        await bot_message.edit_text("Failed to download video with URL {}.".format(video_url), disable_web_page_preview=True)
     except KeyboardInterrupt:
         raise
     except Exception as e:
@@ -851,7 +852,8 @@ async def songs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 "The following are not valid URLs: {}. Please try again.".format(
                     invalid_urls
-                )
+                ), 
+                disable_web_page_preview=True
             )
             return
         else:
@@ -875,7 +877,8 @@ async def send_songs_playlists(
     await update.message.reply_text(
         "Fetching songs from {} video playlists: {}".format(
             len(playlist_urls), playlist_urls
-        )
+        ), 
+        disable_web_page_preview=True
     )
     for playlist_url in playlist_urls:
         await send_songs_playlist(update, context, playlist_url, repost)
@@ -915,7 +918,7 @@ async def send_songs_playlist(
             playlist_url, user, message.chat
         )
     )
-    bot_message = await message.reply_text("Fetching playlist...")
+    bot_message = await message.reply_text("Fetching playlist with URL {}...".format(playlist_url), disable_web_page_preview=True)
     try:
         with youtube_dl.YoutubeDL(ytdl_options) as ytdl:
             # Retrieve playlist information without downloading
@@ -1217,7 +1220,7 @@ async def send_songs_playlist(
                     # Value of entry evaluated Falsy. Skip it
                     continue
     except youtube_dl.utils.DownloadError:
-        await bot_message.edit_text("Failed to download playlist.")
+        await bot_message.edit_text("Failed to download playlist with URL {}.".format(playlist_url), disable_web_page_preview=True)
     except KeyboardInterrupt:
         raise
     except Exception as e:
@@ -1318,7 +1321,8 @@ async def video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 "The following are not valid URLs: {}. Please try again.".format(
                     invalid_urls
-                )
+                ), 
+                disable_web_page_preview=True
             )
             return
         else:
@@ -1342,7 +1346,8 @@ async def send_videos_individual(
 ) -> None:
     """Send videos in chat from video URL(s)."""
     await update.message.reply_text(
-        "Fetching videos from {} URLs: {}".format(len(video_urls), video_urls)
+        "Fetching videos from {} URLs:\n{}".format(len(video_urls), "\n".join(video_urls)), 
+        disable_web_page_preview=True
     )
     for video_url in video_urls:
         await send_video_individual(update, context, video_url, repost)
@@ -1644,7 +1649,7 @@ async def send_video_individual(
                 # Value of entry evaluated Falsy. Skip it
                 raise Exception("Video info evaluated to falsy")
     except youtube_dl.utils.DownloadError:
-        await bot_message.edit_text("Failed to download video.")
+        await bot_message.edit_text("Failed to download video with URL {}.".format(video_url))
     except KeyboardInterrupt:
         raise
     except Exception as e:
@@ -1729,7 +1734,8 @@ async def videos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await message.reply_text(
                 "The following are not valid URLs: {}. Please try again.".format(
                     invalid_urls
-                )
+                ), 
+                disable_web_page_preview=True
             )
             return
         else:
@@ -1755,7 +1761,8 @@ async def send_videos_playlists(
     await update.message.reply_text(
         "Fetching videos from {} playlists: {}".format(
             len(playlist_urls), playlist_urls
-        )
+        ), 
+        disable_web_page_preview=True
     )
     for playlist_url in playlist_urls:
         await send_videos_playlist(update, context, playlist_url, repost)
@@ -2105,7 +2112,7 @@ async def send_videos_playlist(
                     # Value of entry evaluated Falsy. Skip it
                     continue
     except youtube_dl.utils.DownloadError:
-        await bot_message.edit_text("Failed to download playlist.")
+        await bot_message.edit_text("Failed to download playlist with URL {}.".format(playlist_url))
     except KeyboardInterrupt:
         raise
     except Exception as e:
