@@ -166,3 +166,4 @@ cython_debug/
 settings.ini
 config.toml
 Temp-YouTube-Files/
+cookies.*.txt

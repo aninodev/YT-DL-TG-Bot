@@ -55,6 +55,10 @@ parser.add_argument(
     default=None,
 )
 parser.add_argument(
+    "--cookies-file",
+    help="Path of files containing netscape format cookies for yt-dlp.",
+)
+parser.add_argument(
     "--song-output-template",
     help="Output filepath template for the temporary song files downloaded before sending to the chat.",
     type=str,
@@ -132,6 +136,11 @@ arg_bindings = {
         "type": str,
         "tree": ["Database", "path"],
     },
+    "cookies_file": {
+        "type": str,
+        "tree": ["YoutubeDL", "cookies_file_path"],
+        "optional": True,
+    },
     "song_output_template": {
         "type": str,
         "tree": ["YoutubeDL", "song_output_template"],
@@ -196,6 +205,7 @@ def get_settings():
         if value is None:
             try:
                 if binding["optional"]:
+                    settings[arg_name] = None
                     continue
             except KeyError:
                 pass
@@ -211,6 +221,7 @@ def get_settings():
             value = binding["type"](value)
         except TypeError:
             if binding["optional"]:
+                settings[arg_name] = None
                 continue
             else:
                 raise TypeError("Param {} is of incorrect type.".format(arg_name))
@@ -463,6 +474,8 @@ async def send_song_individual(
         "audioformat": "opus",
         # Remove the conversion postprocessor
         "postprocessors": [],
+        # Use custom cookies if specified
+        "cookiefile": get_setting("cookies_file"),
         # Output Path Template from config file
         "outtmpl": ytdl_output_template,
         # Continue processing even if a video is unavailable or we run into another error
@@ -881,6 +894,8 @@ async def send_songs_playlist(
         "audioformat": "opus",
         # Remove the conversion postprocessor
         "postprocessors": [],
+        # Use custom cookies if specified
+        "cookiefile": get_setting("cookies_file"),
         # Output Path Template from config file
         "outtmpl": ytdl_output_template,
         # Continue processing even if a video is unavailable or we run into another error
@@ -1344,6 +1359,8 @@ async def send_video_individual(
         "format": "(bv*[vcodec~='^((he|a)vc|h26[45])']+ba[ext=m4a])",
         "merge_output_format": "mp4",
         "postprocessors": [],
+        # Use custom cookies if specified
+        "cookiefile": get_setting("cookies_file"),
         "outtmpl": ytdl_output_template,
         "ignoreerrors": True,
         "extract_flat": True,
@@ -1762,6 +1779,8 @@ async def send_videos_playlist(
         # "audioformat": "opus",
         # Remove the conversion postprocessor
         "postprocessors": [],
+        # Use custom cookies if specified
+        "cookiefile": get_setting("cookies_file"),
         # Output Path Template from config file
         "outtmpl": ytdl_output_template,
         # Continue processing even if a video is unavailable or we run into another error
