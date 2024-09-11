@@ -1400,6 +1400,7 @@ async def send_videos_individual(
 async def send_video_individual(
     update: Update, context: ContextTypes.DEFAULT_TYPE, video_url: str, repost: bool
 ) -> None:
+    """This function was AI generated based on our existing functions using Anthropic Claude 3.5 Sonnet. It still seems to function as intended, but that is why it is somewhat different in formatting."""
     message = update.effective_message
     user = update.effective_user
     try:
